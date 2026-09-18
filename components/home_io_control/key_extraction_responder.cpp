@@ -109,6 +109,19 @@ constexpr uint32_t KEY_EXTRACTION_POST_EXTRACT_GRACE_MS = 60000;  ///< One minut
 // address-verification round — the exact failure this feature exists to fix. Not measured.
 constexpr const char *KEY_EXTRACTION_GRACE_TIMER_NAME = "key_extraction_post_extract_grace";
 
+/// True in the three pre-key-transfer states a hub interrogates a freshly-discovered device in:
+/// after our discovery response, our discovery-confirm ack, or our challenge, but before a key
+/// transfer has completed. Some hubs (Somfy Nina io "add product") read metadata (0x54, 0x58) and
+/// request the device address (0x36) in this window before starting the key exchange; those reads
+/// are answered as pure interleaved replies that never advance the pairing state. Distinct from the
+/// EXTRACTED/SENT_ADDRESS_RESP post-extraction window that the KLR200 address-verification round
+/// (handle_address_req_()/handle_address_challenge_()) runs in.
+bool is_prekey_interrogation_phase(pairing_responder::ResponderState state) {
+  return state == pairing_responder::ResponderState::SENT_DISCOVER_RESP ||
+         state == pairing_responder::ResponderState::SENT_CONFIRM_ACK ||
+         state == pairing_responder::ResponderState::SENT_CHALLENGE;
+}
+
 }  // namespace
 
 KeyExtractionResponder::KeyExtractionResponder(const uint8_t *node_id, RadioDriver **radio, const TuningConfig *tuning,
@@ -361,12 +374,31 @@ void KeyExtractionResponder::handle_key_transfer_(const IoFrame &frame) {
 }
 
 void KeyExtractionResponder::handle_address_req_(const IoFrame &frame) {
-  // Our throwaway ID is not a secret -- it went out in clear in our own 0x29/0x37 -- so the dst
-  // check in try_handle_frame() alone doesn't establish this frame actually came from the hub we
-  // exchanged keys with. hub_node_id was captured from the 0x31 that started this attempt
-  // (pairing_responder::on_key_init()); anything else claiming our throwaway ID as dst is not that
-  // hub and gets no reply, closing an otherwise-unbounded loop an onlooker could drive to keep
-  // re-arming the grace window for as long as the arm cycle lasts.
+  // Pre-key phase: some hubs (Somfy Nina io "add product") request the device address during the
+  // enrollment interrogation, before any key exchange, and abandon the attempt if it goes
+  // unanswered (confirmed on-air against hub AE2100: 0x36 sent 5x, then Nina restarts). Answer with
+  // our 0x37 but, exactly like the 0x54/0x58 metadata reads, treat it as a pure interleaved reply:
+  // no state change, no grace window, and no hub-identity guard -- ctx.hub_node_id is only captured
+  // at 0x31 (on_key_init()), which hasn't happened yet, and the reply carries only our throwaway
+  // backbone address, which already went out in clear in our 0x29, so there is nothing to protect.
+  if (is_prekey_interrogation_phase(this->key_extraction_ctx_.state)) {
+    IoFrame prekey_resp;
+    if (!create_address_resp_device_role(prekey_resp, this->key_extraction_ctx_.throwaway_id, frame.src)) {
+      ESP_LOGW(detail::TAG, "Key extraction: failed to build pre-key address response");
+      return;
+    }
+    this->broadcast_reply_(prekey_resp);
+    ESP_LOGI(detail::TAG, "Key extraction: answered pre-key address request (0x36) from hub %s",
+             node_id_to_string(frame.src).c_str());
+    return;
+  }
+
+  // Post-extraction (KLR200-style) path below. Our throwaway ID is not a secret -- it went out in
+  // clear in our own 0x29/0x37 -- so the dst check in try_handle_frame() alone doesn't establish
+  // this frame actually came from the hub we exchanged keys with. hub_node_id was captured from the
+  // 0x31 that started this attempt (pairing_responder::on_key_init()); anything else claiming our
+  // throwaway ID as dst is not that hub and gets no reply, closing an otherwise-unbounded loop an
+  // onlooker could drive to keep re-arming the grace window for as long as the arm cycle lasts.
   if (memcmp(frame.src, this->key_extraction_ctx_.hub_node_id, NODE_ID_SIZE) != 0)
     return;
   if (!pairing_responder::on_address_req(this->key_extraction_ctx_))
@@ -424,10 +456,7 @@ void KeyExtractionResponder::handle_get_info1_(const IoFrame &frame) {
   // every exchange-advancing handler above it deliberately does NOT mutate key_extraction_ctx_.state
   // or the CH2 hold deadline — an interleaved info read must not pull the exchange forward or back a
   // phase, and the hub's next real step (0x2C retry or 0x31) re-arms the hold on its own.
-  const auto state = this->key_extraction_ctx_.state;
-  if (state != pairing_responder::ResponderState::SENT_DISCOVER_RESP &&
-      state != pairing_responder::ResponderState::SENT_CONFIRM_ACK &&
-      state != pairing_responder::ResponderState::SENT_CHALLENGE)
+  if (!is_prekey_interrogation_phase(this->key_extraction_ctx_.state))
     return;
 
   IoFrame resp;
@@ -443,10 +472,7 @@ void KeyExtractionResponder::handle_get_info1_(const IoFrame &frame) {
 void KeyExtractionResponder::handle_general_info3_(const IoFrame &frame) {
   // Same active-exchange gate and pure-read discipline as handle_get_info1_() above (see its comment
   // for the full reasoning): answer only mid-exchange, never mutate state or the CH2 hold.
-  const auto state = this->key_extraction_ctx_.state;
-  if (state != pairing_responder::ResponderState::SENT_DISCOVER_RESP &&
-      state != pairing_responder::ResponderState::SENT_CONFIRM_ACK &&
-      state != pairing_responder::ResponderState::SENT_CHALLENGE)
+  if (!is_prekey_interrogation_phase(this->key_extraction_ctx_.state))
     return;
 
   // A real Somfy device answers 0x58 with "not implemented" rather than a 0x59 body — see
