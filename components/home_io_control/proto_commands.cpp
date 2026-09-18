@@ -747,6 +747,28 @@ bool create_discover_confirm_ack(IoFrame &f, const uint8_t *own, const uint8_t *
   return create_device_terminal_ack(f, own, dst, CMD_DISCOVER_CONFIRM_ACK);
 }
 
+/// Static GET_INFO1_RESP (0x55) body, modeled byte-for-byte on the only real 0x55 ever captured:
+/// a Velux INTEGRA window actuator's reply in
+/// tests/corpus/captures/probe/velux_window_probe_metadata_replies.yaml (issue #98) — 9 zero bytes,
+/// then 0x30 0x03, then 3 zero bytes. That capture documents the body as "static device metadata,
+/// no position or limit content," so a fixed reply is faithful to what a real device sends.
+/// UNCONFIRMED against a Somfy device or against any hub's acceptance criteria — this is the single
+/// speculative field of create_get_info1_resp() (see this file's key-extraction @warning header).
+static constexpr uint8_t GET_INFO1_RESP_STATIC_BODY[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                                         0x00, 0x00, 0x30, 0x03, 0x00, 0x00, 0x00};
+
+/// Build a device-info-1 response (0x55) — device side, used only by the key-extraction responder.
+/// See proto_commands.h for the full contract and the speculation caveat.
+bool create_get_info1_resp(IoFrame &f, const uint8_t *own, const uint8_t *dst) {
+  // Same device-terminal framing as create_discover_confirm_ack()/create_key_confirm() (END set,
+  // START and LOW_POWER clear), matching the captured 0x55's ctrl0=0x96/ctrl1=0x00, differing only
+  // in the command byte and the static payload it carries.
+  init_frame(f, true, false, true, false);
+  set_dst(f, dst);
+  set_src(f, own);
+  return set_cmd(f, CMD_GET_INFO1_RESP, GET_INFO1_RESP_STATIC_BODY, sizeof(GET_INFO1_RESP_STATIC_BODY));
+}
+
 /// Recover the system key from a CMD_KEY_TRANSFER payload. See proto_commands.h for the full
 /// contract; this is the single place the IV-`data` convention (`{CMD_KEY_INIT}, len 1`) lives
 /// for the decode direction, mirroring create_key_transfer()'s encode side below.

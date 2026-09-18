@@ -217,6 +217,10 @@ bool KeyExtractionResponder::try_handle_frame(const IoFrame &frame) {
     this->handle_address_challenge_(frame);
     return true;
   }
+  if (frame.cmd == CMD_GET_INFO1) {
+    this->handle_get_info1_(frame);
+    return true;
+  }
   return false;
 }
 
@@ -406,6 +410,30 @@ void KeyExtractionResponder::handle_address_challenge_(const IoFrame &frame) {
   // Do NOT disarm here — re-arm the grace window instead and stay in SENT_ADDRESS_RESP so a
   // retried 0x3C is answered (on_address_challenge() deliberately never advances state).
   this->arm_post_extraction_grace();
+}
+
+void KeyExtractionResponder::handle_get_info1_(const IoFrame &frame) {
+  // Only answer inside an active exchange (discovery replied to, key transfer not yet done). A
+  // real hub's metadata read lands between discovery-confirm and key-init; answering it in
+  // ARMED_IDLE (no discovery seen) or in a completed/post-extraction phase would be responding to
+  // stray traffic, not to the round this responder is actually running. This is a pure read: unlike
+  // every exchange-advancing handler above it deliberately does NOT mutate key_extraction_ctx_.state
+  // or the CH2 hold deadline — an interleaved info read must not pull the exchange forward or back a
+  // phase, and the hub's next real step (0x2C retry or 0x31) re-arms the hold on its own.
+  const auto state = this->key_extraction_ctx_.state;
+  if (state != pairing_responder::ResponderState::SENT_DISCOVER_RESP &&
+      state != pairing_responder::ResponderState::SENT_CONFIRM_ACK &&
+      state != pairing_responder::ResponderState::SENT_CHALLENGE)
+    return;
+
+  IoFrame resp;
+  if (!create_get_info1_resp(resp, this->key_extraction_ctx_.throwaway_id, frame.src)) {
+    ESP_LOGW(detail::TAG, "Key extraction: failed to build device-info-1 response");
+    return;
+  }
+  this->broadcast_reply_(resp);
+  ESP_LOGI(detail::TAG, "Key extraction: answered device-info-1 (0x54) read from hub %s (static reply)",
+           node_id_to_string(frame.src).c_str());
 }
 
 void KeyExtractionResponder::arm_post_extraction_grace() {

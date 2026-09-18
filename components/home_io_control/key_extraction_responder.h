@@ -155,6 +155,15 @@ class KeyExtractionResponder {
   /// address-verification round a CMD_ADDRESS_REQ opened. See
   /// pairing_responder::on_address_challenge().
   void handle_address_challenge_(const IoFrame &frame);
+  /// Handle an inbound CMD_GET_INFO1 (0x54) addressed to our throwaway node ID while armed and
+  /// mid-exchange. Some hubs (Somfy Nina io "add product" flow) gate the pairing sequence on this
+  /// metadata read between discovery-confirm and key-init: without a CMD_GET_INFO1_RESP (0x55)
+  /// answer the hub retries 0x54 a few times and then abandons the attempt, never sending
+  /// CMD_KEY_INIT (0x31). Replies with a static 0x55 (create_get_info1_resp()) and, unlike the
+  /// exchange-advancing handlers above, does NOT touch key_extraction_ctx_.state — an info read is
+  /// interleaved into the exchange, not a step of it. See the speculation @warning on
+  /// create_get_info1_resp() in proto_commands.h.
+  void handle_get_info1_(const IoFrame &frame);
   /// Transmit a key-extraction reply frame on all 3 IO-homecontrol channels, using the radio
   /// driver's response_preamble() rather than a fixed SHORT_PREAMBLE/LONG_PREAMBLE constant —
   /// long enough that a channel-hopping receiver reliably lands on it, short enough that 3

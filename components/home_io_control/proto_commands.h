@@ -665,6 +665,28 @@ bool create_discover_confirm(IoFrame &f, const uint8_t *own, const uint8_t *dst,
 /// @return true on success.
 bool create_discover_confirm_ack(IoFrame &f, const uint8_t *own, const uint8_t *dst);
 
+/// @brief Build a device-info-1 response (0x55) — the device's answer to a hub's CMD_GET_INFO1
+/// (0x54) metadata read.
+///
+/// Device-side only, like create_discover_resp()/create_discover_confirm_ack() above. Some hubs
+/// gate the pairing sequence on a metadata read *between* discovery-confirm and key-init: a Somfy
+/// Nina io ("add product" flow) sends 0x54 to a freshly-discovered device and, getting no 0x55
+/// back, retries it several times and then abandons the attempt without ever sending CMD_KEY_INIT
+/// (0x31) — the key-extraction responder previously had no 0x54 handler, so extraction stalled
+/// against Nina. Answering it lets that hub proceed to the key exchange.
+///
+/// @warning The 14-byte body is static and reverse-engineered from a single real capture (a Velux
+/// window actuator, tests/corpus/captures/probe/velux_window_probe_metadata_replies.yaml), NOT from
+/// a Somfy device and NOT confirmed to satisfy any hub's acceptance check. It is the most
+/// speculative device-role builder in this file; treat a pairing that only works because of it as
+/// unverified until confirmed against real hardware, exactly like every other field flagged in
+/// key_extraction_responder.cpp's header @warning.
+/// @param f IoFrame to populate.
+/// @param own Our advertised (throwaway) node ID.
+/// @param dst Destination node ID (the hub that sent the info request).
+/// @return true on success.
+bool create_get_info1_resp(IoFrame &f, const uint8_t *own, const uint8_t *dst);
+
 /// @brief Recover the system key from an inbound CMD_KEY_TRANSFER (0x32) payload — the decode
 /// counterpart to create_key_transfer()'s encode.
 ///

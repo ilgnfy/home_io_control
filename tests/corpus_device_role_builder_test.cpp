@@ -245,3 +245,29 @@ TEST(CorpusDeviceRoleBuilders, ChallengeRespDeviceRoleMatchesKlr200AddressVerifi
                                                 test::TEST_SYSTEM_KEY));
   expect_matches_real_device_capture(CMD_CHALLENGE_RESP, "velux_kux100_pairing_full", built);
 }
+
+/// Our CMD_GET_INFO1_RESP (0x55), answering a hub's metadata read during key extraction. The only
+/// real 0x55 in the corpus is a Velux window actuator's static reply (issue #98); this pins both our
+/// framing bits and the exact 14-byte body against it, so a future edit to either can't silently
+/// drift from the one device frame we modeled it on. Both the builder and this capture are the whole
+/// evidence base for the field — see create_get_info1_resp()'s @warning: unconfirmed against Somfy
+/// hardware, so this test guards fidelity-to-capture, not correctness-against-Nina.
+TEST(CorpusDeviceRoleBuilders, GetInfo1RespMatchesRealDevices) {
+  IoFrame built{};
+  ASSERT_TRUE(create_get_info1_resp(built, test::OWN_ID, test::DST_ID));
+  expect_matches_real_devices(CMD_GET_INFO1_RESP, built);
+
+  const corpus::CorpusCapture *cap = corpus_test::capture_by_id("velux_window_probe_metadata_replies");
+  ASSERT_NE(cap, nullptr) << "capture 'velux_window_probe_metadata_replies' not found -- was it renamed?";
+  bool checked = false;
+  for (uint8_t i = 0; i < cap->frame_count; i++) {
+    const IoFrame parsed = corpus_test::parse_capture_frame(cap->frames[i]);
+    if (cap->frames[i].tx || parsed.cmd != CMD_GET_INFO1_RESP)
+      continue;
+    ASSERT_EQ(built.data_len, parsed.data_len) << "0x55 body length must match the captured device reply";
+    EXPECT_EQ(0, memcmp(built.data, parsed.data, parsed.data_len))
+        << "0x55 body must be byte-identical to the captured device reply we modeled it on";
+    checked = true;
+  }
+  ASSERT_TRUE(checked) << "no device-originated 0x55 frame in the capture to pin the payload against";
+}
