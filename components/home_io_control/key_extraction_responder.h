@@ -164,6 +164,12 @@ class KeyExtractionResponder {
   /// interleaved into the exchange, not a step of it. See the speculation @warning on
   /// create_get_info1_resp() in proto_commands.h.
   void handle_get_info1_(const IoFrame &frame);
+  /// Handle an inbound CMD_GET_GENERAL_INFO3 (0x58) addressed to our throwaway node ID while armed
+  /// and mid-exchange. Nina io's pairing sweep probes 0x58 after 0x54; without a reply it retries
+  /// and abandons the attempt. Answers with CMD_ERROR_RESP (0xFE) result 0x08 — the "opcode not
+  /// implemented" reply a real Somfy device sends for 0x58 (create_error_resp()). Pure read: does
+  /// NOT mutate key_extraction_ctx_.state, same as handle_get_info1_().
+  void handle_general_info3_(const IoFrame &frame);
   /// Transmit a key-extraction reply frame on all 3 IO-homecontrol channels, using the radio
   /// driver's response_preamble() rather than a fixed SHORT_PREAMBLE/LONG_PREAMBLE constant —
   /// long enough that a channel-hopping receiver reliably lands on it, short enough that 3

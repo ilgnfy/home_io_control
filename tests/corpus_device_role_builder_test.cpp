@@ -271,3 +271,28 @@ TEST(CorpusDeviceRoleBuilders, GetInfo1RespMatchesRealDevices) {
   }
   ASSERT_TRUE(checked) << "no device-originated 0x55 frame in the capture to pin the payload against";
 }
+
+/// Our CMD_ERROR_RESP (0xFE) answer to a metadata read the emulated device does not implement,
+/// used for CMD_GET_GENERAL_INFO3 (0x58) during key extraction. Pinned against a real Somfy Izymo's
+/// 0x58->0xFE/0x08 in the KIG300 probe burst: both framing bits and the single 0x08 result byte, so
+/// this stays byte-faithful to the device we modeled the "not implemented" reply on.
+TEST(CorpusDeviceRoleBuilders, ErrorRespMatchesRealSomfyGeneralInfo3Reply) {
+  IoFrame built{};
+  ASSERT_TRUE(create_error_resp(built, test::OWN_ID, test::DST_ID, RESULT_ERROR_DURING_EXECUTION));
+  expect_matches_real_device_capture(CMD_ERROR_RESP, "velux_kig300_probe_capability_burst", built);
+
+  const corpus::CorpusCapture *cap = corpus_test::capture_by_id("velux_kig300_probe_capability_burst");
+  ASSERT_NE(cap, nullptr) << "capture 'velux_kig300_probe_capability_burst' not found -- was it renamed?";
+  bool checked = false;
+  for (uint8_t i = 0; i < cap->frame_count; i++) {
+    const IoFrame parsed = corpus_test::parse_capture_frame(cap->frames[i]);
+    if (cap->frames[i].tx || parsed.cmd != CMD_ERROR_RESP)
+      continue;
+    ASSERT_EQ(1u, parsed.data_len) << "the modeled 0xFE reply carries a single result byte";
+    ASSERT_EQ(built.data_len, parsed.data_len);
+    EXPECT_EQ(RESULT_ERROR_DURING_EXECUTION, parsed.data[0]) << "modeled on the captured 0x08 result byte";
+    EXPECT_EQ(built.data[0], parsed.data[0]);
+    checked = true;
+  }
+  ASSERT_TRUE(checked) << "no device-originated 0xFE frame in the capture to pin the payload against";
+}

@@ -221,6 +221,10 @@ bool KeyExtractionResponder::try_handle_frame(const IoFrame &frame) {
     this->handle_get_info1_(frame);
     return true;
   }
+  if (frame.cmd == CMD_GET_GENERAL_INFO3) {
+    this->handle_general_info3_(frame);
+    return true;
+  }
   return false;
 }
 
@@ -433,6 +437,27 @@ void KeyExtractionResponder::handle_get_info1_(const IoFrame &frame) {
   }
   this->broadcast_reply_(resp);
   ESP_LOGI(detail::TAG, "Key extraction: answered device-info-1 (0x54) read from hub %s (static reply)",
+           node_id_to_string(frame.src).c_str());
+}
+
+void KeyExtractionResponder::handle_general_info3_(const IoFrame &frame) {
+  // Same active-exchange gate and pure-read discipline as handle_get_info1_() above (see its comment
+  // for the full reasoning): answer only mid-exchange, never mutate state or the CH2 hold.
+  const auto state = this->key_extraction_ctx_.state;
+  if (state != pairing_responder::ResponderState::SENT_DISCOVER_RESP &&
+      state != pairing_responder::ResponderState::SENT_CONFIRM_ACK &&
+      state != pairing_responder::ResponderState::SENT_CHALLENGE)
+    return;
+
+  // A real Somfy device answers 0x58 with "not implemented" rather than a 0x59 body — see
+  // create_error_resp() in proto_commands.cpp for the captured evidence.
+  IoFrame resp;
+  if (!create_error_resp(resp, this->key_extraction_ctx_.throwaway_id, frame.src, RESULT_ERROR_DURING_EXECUTION)) {
+    ESP_LOGW(detail::TAG, "Key extraction: failed to build general-info-3 error response");
+    return;
+  }
+  this->broadcast_reply_(resp);
+  ESP_LOGI(detail::TAG, "Key extraction: answered general-info-3 (0x58) read from hub %s (not-implemented error)",
            node_id_to_string(frame.src).c_str());
 }
 

@@ -687,6 +687,25 @@ bool create_discover_confirm_ack(IoFrame &f, const uint8_t *own, const uint8_t *
 /// @return true on success.
 bool create_get_info1_resp(IoFrame &f, const uint8_t *own, const uint8_t *dst);
 
+/// @brief Build a CMD_ERROR_RESP (0xFE) carrying a single result-code byte — device side.
+///
+/// Device-side only, used by the key-extraction responder to answer a metadata read the emulated
+/// device does not implement. A real Somfy device answers CMD_GET_GENERAL_INFO3 (0x58) exactly this
+/// way — RESULT_ERROR_DURING_EXECUTION (0x08), meaning "I don't implement that opcode" — rather than
+/// with a 0x59 body (tests/corpus/captures/probe/velux_kig300_probe_capability_burst.yaml, a real
+/// Somfy Izymo; the same 0x58->0xFE/0x08 also appears from a Velux window in
+/// tests/corpus/captures/probe/velux_window_probe_metadata_replies.yaml). Answering the read this
+/// way lets a hub whose pairing sweep probes 0x58 proceed instead of stalling on silence. Unlike the
+/// fabricated 0x55 body of create_get_info1_resp(), this frame is a documented real-device reply, so
+/// it is the least speculative of the metadata-gate answers — but it is still only pinned against a
+/// probe capture, not a full pairing against a hub that gates on it.
+/// @param f IoFrame to populate.
+/// @param own Our advertised (throwaway) node ID.
+/// @param dst Destination node ID (the hub that sent the request).
+/// @param result_code CMD_ERROR_RESP result byte (see RESULT_* in proto_constants.h).
+/// @return true on success.
+bool create_error_resp(IoFrame &f, const uint8_t *own, const uint8_t *dst, uint8_t result_code);
+
 /// @brief Recover the system key from an inbound CMD_KEY_TRANSFER (0x32) payload — the decode
 /// counterpart to create_key_transfer()'s encode.
 ///

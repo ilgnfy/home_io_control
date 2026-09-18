@@ -769,6 +769,20 @@ bool create_get_info1_resp(IoFrame &f, const uint8_t *own, const uint8_t *dst) {
   return set_cmd(f, CMD_GET_INFO1_RESP, GET_INFO1_RESP_STATIC_BODY, sizeof(GET_INFO1_RESP_STATIC_BODY));
 }
 
+/// Build a CMD_ERROR_RESP (0xFE) — device side, a single result-code byte. Used by the
+/// key-extraction responder to answer a metadata read the emulated device does not implement (e.g.
+/// CMD_GET_GENERAL_INFO3, 0x58). See proto_commands.h for the contract and the real-capture pin.
+bool create_error_resp(IoFrame &f, const uint8_t *own, const uint8_t *dst, uint8_t result_code) {
+  // Same device-terminal framing as create_get_info1_resp() above (END set, START/LOW_POWER clear),
+  // matching a real Somfy Izymo's 0x58->ERROR_RESP in
+  // tests/corpus/captures/probe/velux_kig300_probe_capability_burst.yaml ("89 00 CA 0A 18 58 6E 37
+  // FE 08": ctrl0=0x89, ctrl1=0x00, one 0x08 result byte).
+  init_frame(f, true, false, true, false);
+  set_dst(f, dst);
+  set_src(f, own);
+  return set_cmd(f, CMD_ERROR_RESP, &result_code, 1);
+}
+
 /// Recover the system key from a CMD_KEY_TRANSFER payload. See proto_commands.h for the full
 /// contract; this is the single place the IV-`data` convention (`{CMD_KEY_INIT}, len 1`) lives
 /// for the decode direction, mirroring create_key_transfer()'s encode side below.
