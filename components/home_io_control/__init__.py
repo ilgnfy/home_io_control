@@ -74,6 +74,7 @@ CONF_ACCEPT_FOREIGN_PAIRING = "accept_foreign_pairing"
 CONF_RECOVER_ONEWAY_KEY = "recover_oneway_key"
 CONF_SCAN_PAIRED_DEVICES_BUTTON = "scan_paired_devices_button"
 CONF_DISCOVER_AND_PAIR_BUTTON = "discover_and_pair_button"
+CONF_REQUEST_KEY_BUTTON = "request_key_button"
 CONF_ONEWAY_CONTROLLERS = "oneway_controllers"
 # Internal marker recording that an identity's node_id was derived rather than configured, so
 # validation errors and the boot log can say which it was.
@@ -139,6 +140,7 @@ CONF_SCAN_PAIRED_DEVICES_BUTTON_ID = "_scan_paired_devices_button_id"
 # Internal config key for the "Discover & Pair" button ID (injected by post-validator; same
 # rationale as CONF_ACCEPT_FOREIGN_PAIRING_SWITCH_ID above).
 CONF_DISCOVER_AND_PAIR_BUTTON_ID = "_discover_and_pair_button_id"
+CONF_REQUEST_KEY_BUTTON_ID = "_request_key_button_id"
 # Internal config key for the "Last Pairing Result" companion sensor ID that ships with the button
 # above (injected by the same post-validator, gated on the same flag). Deliberately NOT shared
 # with button.py's identically-purposed CONF_PAIRING_RESULT_SENSOR_ID: during the deprecation
@@ -192,6 +194,13 @@ IOHomeScanPairedDevicesButton = home_io_control_ns.class_(
 # duration of its deprecation window and imports both names from this module.
 IOHomeDiscoverButton = home_io_control_ns.class_(
     "IOHomeDiscoverButton", button_component.Button, cg.Component
+)
+# Hub-level "Request System Key" button (platform_hub_controls.h). Created from
+# `home_io_control.request_key_button: true`. Fires a device-initiated "pull" key request
+# (CMD_LAUNCH_KEY_TRANSFER, 0x38) for hubs that hand over their key only when the receiver asks --
+# e.g. Somfy Nina io "Schlüssel senden". Same hub-block-flag shape as the buttons above.
+IOHomeRequestKeyButton = home_io_control_ns.class_(
+    "IOHomeRequestKeyButton", button_component.Button, cg.Component
 )
 IOHomePairingResultTextSensor = home_io_control_ns.class_(
     "IOHomePairingResultTextSensor", text_sensor_component.TextSensor, cg.Component
@@ -284,6 +293,16 @@ def _inject_discover_and_pair_button_id(config):
         id_key=CONF_DISCOVER_AND_PAIR_BUTTON_ID,
         suffix="discover_and_pair_button",
         cls=IOHomeDiscoverButton,
+    )
+
+
+def _inject_request_key_button_id(config):
+    return _inject_hub_entity_id(
+        config,
+        flag_key=CONF_REQUEST_KEY_BUTTON,
+        id_key=CONF_REQUEST_KEY_BUTTON_ID,
+        suffix="request_key_button",
+        cls=IOHomeRequestKeyButton,
     )
 
 
@@ -1276,6 +1295,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_RECOVER_ONEWAY_KEY, default=False): cv.boolean,
             cv.Optional(CONF_SCAN_PAIRED_DEVICES_BUTTON, default=False): cv.boolean,
             cv.Optional(CONF_DISCOVER_AND_PAIR_BUTTON, default=False): cv.boolean,
+            cv.Optional(CONF_REQUEST_KEY_BUTTON, default=False): cv.boolean,
             cv.Optional(CONF_ONEWAY_CONTROLLERS, default=[]): cv.ensure_list(
                 ONEWAY_CONTROLLER_SCHEMA
             ),
@@ -1291,6 +1311,7 @@ CONFIG_SCHEMA = cv.All(
     _inject_scan_paired_devices_button_id,
     _inject_discover_and_pair_button_id,
     _inject_discover_and_pair_result_sensor_id,
+    _inject_request_key_button_id,
     _validate_oneway_controllers,
     _validate_lr1121_firmware_update,
     _validate_fem,
@@ -1387,6 +1408,9 @@ async def to_code(config):
 
     if config[CONF_DISCOVER_AND_PAIR_BUTTON]:
         await _create_discover_and_pair_button(config, var)
+
+    if config[CONF_REQUEST_KEY_BUTTON]:
+        await _create_request_key_button(config, var)
 
     cg.add(var.set_diagnostic_probes_enabled(config[CONF_DIAGNOSTIC_PROBES]))
 
@@ -1553,6 +1577,28 @@ async def _create_discover_and_pair_button(config, var):
     result_sensor = await text_sensor_component.new_text_sensor(sensor_config)
     await cg.register_component(result_sensor, sensor_config)
     cg.add(result_sensor.set_parent(var))
+
+
+async def _create_request_key_button(config, var):
+    """Create the hub-level "Request System Key" button.
+
+    Same normalization as _create_scan_paired_devices_button() above. Fires a device-initiated
+    "pull" key request (CMD_LAUNCH_KEY_TRANSFER, 0x38) via IOHomeControlComponent's
+    request_system_key_pull(); the recovered key and hub address are printed to the log like the
+    "Recover System Key" switch's own result block, so no companion result sensor is created.
+    """
+    entity_config = button_component.button_schema(
+        IOHomeRequestKeyButton,
+        entity_category=ENTITY_CATEGORY_CONFIG,
+    ).extend(cv.COMPONENT_SCHEMA)(
+        {
+            CONF_ID: config[CONF_REQUEST_KEY_BUTTON_ID],
+            CONF_NAME: "Request System Key",
+        }
+    )
+    entity = await button_component.new_button(entity_config)
+    await cg.register_component(entity, entity_config)
+    cg.add(entity.set_parent(var))
 
 
 def _cached_http_fetch(cache_dir):

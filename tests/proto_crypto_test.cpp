@@ -143,6 +143,38 @@ TEST(ProtoCrypto, CryptKeyMatchesDocumentedIownHomecontrolPullCapture) {
       << "crypt_key() must recover the documented Pull-flow device key from the captured wire ciphertext";
 }
 
+TEST(ProtoCrypto, RecoverSystemKeyFromPullTransferMatchesDocumentedCapture) {
+  // Pins the recover_system_key_from_pull_transfer() wrapper (proto_commands.cpp) against the same
+  // documented iown-homecontrol pull capture as CryptKeyMatchesDocumentedIownHomecontrolPullCapture
+  // above, proving its IV assembly ({CMD_LAUNCH_KEY_TRANSFER} + the 6-byte challenge) is correct —
+  // the single crypto guarantee the experimental pull key-request path rests on.
+  const uint8_t challenge[HMAC_SIZE] = {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC};
+  const uint8_t wire_ciphertext[AES_KEY_SIZE] = {0xEA, 0x42, 0x5A, 0x7A, 0x18, 0x28, 0x85, 0xD4,
+                                                 0xEA, 0xEE, 0xFD, 0x41, 0x6D, 0x62, 0x5E, 0x01};
+  const uint8_t expected_key[AES_KEY_SIZE] = {0xAB, 0xCD, 0xEF, 0x01, 0x02, 0x03, 0x04, 0x05,
+                                              0x06, 0x07, 0x08, 0x09, 0x10, 0x11, 0x12, 0x13};
+
+  uint8_t recovered[AES_KEY_SIZE] = {0};
+  ASSERT_TRUE(recover_system_key_from_pull_transfer(wire_ciphertext, challenge, recovered));
+  EXPECT_EQ(0, memcmp(recovered, expected_key, AES_KEY_SIZE))
+      << "recover_system_key_from_pull_transfer() must reproduce the documented Pull-flow device key";
+}
+
+TEST(ProtoCrypto, LaunchKeyTransferBuilderFraming) {
+  // No on-air capture pins this request's framing, so this only guards the shape the responder
+  // relies on: START set (a cold-catch frame like our 0x29), END/LOW_POWER clear, cmd 0x38, and the
+  // 6-byte challenge carried verbatim as the payload (it is also the IV seed for the reply).
+  const uint8_t challenge[HMAC_SIZE] = {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC};
+  IoFrame f{};
+  ASSERT_TRUE(create_launch_key_transfer(f, test::OWN_ID, test::DST_ID, challenge));
+  EXPECT_EQ(f.cmd, CMD_LAUNCH_KEY_TRANSFER);
+  EXPECT_TRUE(is_start(f));
+  EXPECT_FALSE(is_end(f));
+  EXPECT_EQ(0, f.ctrl1 & CTRL1_LOW_POWER);
+  ASSERT_EQ(f.data_len, HMAC_SIZE);
+  EXPECT_EQ(0, memcmp(f.data, challenge, HMAC_SIZE));
+}
+
 TEST(ProtoCrypto, CryptKeyRoundTrip) {
   uint8_t encrypted[AES_KEY_SIZE] = {0};
   uint8_t decrypted[AES_KEY_SIZE] = {0};

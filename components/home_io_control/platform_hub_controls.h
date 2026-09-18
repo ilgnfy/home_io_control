@@ -149,6 +149,27 @@ class IOHomeScanPairedDevicesButton : public button::Button, public Component, p
   void press_action() override { this->parent_->trigger_scan_paired_devices(); }
 };
 
+/// @brief Button entity that starts a device-initiated "pull" key request when pressed.
+///
+/// Created when `home_io_control.request_key_button: true` (see `__init__.py`'s
+/// `_create_request_key_button()`). Arms the key-extraction responder and actively transmits
+/// CMD_LAUNCH_KEY_TRANSFER (0x38), for hubs that hand over their key only when the receiver asks —
+/// e.g. Somfy Nina io's "Schlüssel senden" (send-key) function, which otherwise just prompts to
+/// "press key-receive on the device" and never proceeds against the passive extraction responder.
+/// The recovered key and hub address are printed to the log exactly like the "Recover System Key"
+/// switch's own result block. Experimental: the 0x38 request framing is unconfirmed against a real
+/// hub — see create_launch_key_transfer() in proto_commands.h.
+/// @ingroup hioc_platforms
+class IOHomeRequestKeyButton : public button::Button, public Component, public HubBoundEntity {
+ public:
+  void dump_config() override {}
+
+ protected:
+  /// @brief When pressed, start the pull key request — see
+  /// IOHomeControlComponent::request_system_key_pull().
+  void press_action() override { this->parent_->request_system_key_pull(); }
+};
+
 /// @brief Diagnostic text sensor that publishes PairingTelemetry::result_sensor_string()
 /// after every pairing attempt.
 ///

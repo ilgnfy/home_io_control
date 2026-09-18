@@ -721,6 +721,44 @@ bool create_error_resp(IoFrame &f, const uint8_t *own, const uint8_t *dst, uint8
 bool recover_system_key_from_transfer(const uint8_t transfer_payload[AES_KEY_SIZE], const uint8_t challenge[HMAC_SIZE],
                                       uint8_t out_key[AES_KEY_SIZE]);
 
+/// @brief Build a device-initiated ("pull") key-transfer request — CMD_LAUNCH_KEY_TRANSFER (0x38).
+///
+/// Device-side only, used by the key-extraction responder's "Request System Key" action. Some hubs
+/// (Somfy Nina io "Schlüssel senden") do not push their key onto a device they discover; instead
+/// they wait for the *receiver* to ask for it — on a real Somfy receiver, the "key receive" button
+/// makes the device transmit this request, and the sender then replies with a CMD_KEY_TRANSFER
+/// (0x32). The passive extraction responder never emits it, which is why such a sender just prompts
+/// "press key-receive on the device" and never proceeds. The 6-byte challenge becomes both the
+/// payload and (prefixed with the 0x38 command byte) the IV the reply is masked under —
+/// see recover_system_key_from_pull_transfer().
+///
+/// @warning No on-air capture of the request framing exists — START/END/LOW_POWER bits and the
+/// payload-is-just-the-challenge layout are reverse-engineered from the iown-homecontrol pull-flow
+/// description, not confirmed against a real hub. Only the *crypto* (the reply's IV convention) is
+/// pinned by a known-answer vector. Treat the whole pull path as experimental until a real hub
+/// answers it.
+/// @param f IoFrame to populate.
+/// @param own Our advertised (throwaway) node ID.
+/// @param dst Destination — typically the discovery broadcast group (BROADCAST_DISCOVER).
+/// @param challenge 6 random bytes (crypto::generate_challenge()); reused to decode the reply.
+/// @return true on success.
+bool create_launch_key_transfer(IoFrame &f, const uint8_t *own, const uint8_t *dst, const uint8_t challenge[HMAC_SIZE]);
+
+/// @brief Recover the system key from a "pull"-flow CMD_KEY_TRANSFER (0x32) — the sender's answer to
+/// our CMD_LAUNCH_KEY_TRANSFER (0x38).
+///
+/// Pull counterpart to recover_system_key_from_transfer(). The only difference is the IV: the pull
+/// IV is the full 7-byte request ({CMD_LAUNCH_KEY_TRANSFER} + the 6-byte challenge), where the push
+/// IV is the single {CMD_KEY_INIT} byte. This IV convention is a documented iown-homecontrol
+/// known-answer capture, pinned in proto_crypto_test.cpp
+/// (CryptKeyMatchesDocumentedIownHomecontrolPullCapture).
+/// @param transfer_payload 16-byte CMD_KEY_TRANSFER payload (frame.data).
+/// @param challenge The 6-byte challenge we sent in our CMD_LAUNCH_KEY_TRANSFER (0x38).
+/// @param out_key Output: recovered 16-byte system key.
+/// @return true on success (crypt_key() AES failure is the only false case).
+bool recover_system_key_from_pull_transfer(const uint8_t transfer_payload[AES_KEY_SIZE],
+                                           const uint8_t challenge[HMAC_SIZE], uint8_t out_key[AES_KEY_SIZE]);
+
 /// Build a key‑init request (0x31) to start pairing key exchange with a discovered device.
 /// @param f IoFrame to populate.
 /// @param own Controller node ID.

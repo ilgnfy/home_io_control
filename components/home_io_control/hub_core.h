@@ -398,6 +398,15 @@ class IOHomeControlComponent : public Component,
   /// @param armed Desired state.
   virtual void set_key_extraction_armed(bool armed) { this->key_extraction_.set_armed(armed); }
 
+  /// Start a device-initiated "pull" key request (the "Request System Key" button): arm the
+  /// key-extraction responder if needed and actively transmit CMD_LAUNCH_KEY_TRANSFER (0x38),
+  /// retried within the arm window, to ask a sender-mode hub (e.g. Somfy Nina io "Schlüssel senden")
+  /// to hand over its system key rather than waiting to be discovered. Thin forwarder to
+  /// KeyExtractionResponder::request_key_pull(); virtual for the same mock-hub reason as
+  /// set_key_extraction_armed() above. Experimental — see create_launch_key_transfer() in
+  /// proto_commands.h.
+  virtual void request_system_key_pull() { this->key_extraction_.request_key_pull(); }
+
   /// Register a callback invoked whenever the key-extraction armed state changes — manual
   /// toggle, successful extraction, or auto-off timeout — so the switch entity can keep its
   /// displayed state in sync when the hub disarms itself rather than the user. Single-slot,

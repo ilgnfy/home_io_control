@@ -109,6 +109,9 @@ constexpr uint32_t KEY_EXTRACTION_POST_EXTRACT_GRACE_MS = 60000;  ///< One minut
 // address-verification round — the exact failure this feature exists to fix. Not measured.
 constexpr const char *KEY_EXTRACTION_GRACE_TIMER_NAME = "key_extraction_post_extract_grace";
 
+constexpr uint32_t KEY_EXTRACTION_PULL_RETRY_MS = 2000;  ///< Re-send the 0x38 pull request every 2s.
+constexpr const char *KEY_EXTRACTION_PULL_RETRY_TIMER_NAME = "key_extraction_pull_retry";
+
 /// True in the three pre-key-transfer states a hub interrogates a freshly-discovered device in:
 /// after our discovery response, our discovery-confirm ack, or our challenge, but before a key
 /// transfer has completed. Some hubs (Somfy Nina io "add product") read metadata (0x54, 0x58) and
@@ -159,6 +162,7 @@ void KeyExtractionResponder::set_armed(bool armed) {
     if (this->key_extraction_ctx_.state == pairing_responder::ResponderState::DISARMED)
       return;
     this->key_extraction_ctx_ = pairing_responder::ResponderContext{};
+    this->pull_requested_ = false;
     ESP_LOGI(detail::TAG, "Key extraction: disarmed");
     if (this->armed_callback_)
       this->armed_callback_(false);
@@ -166,6 +170,7 @@ void KeyExtractionResponder::set_armed(bool armed) {
   }
 
   this->key_extraction_ctx_ = pairing_responder::ResponderContext{};
+  this->pull_requested_ = false;
   this->generate_throwaway_id(this->key_extraction_ctx_.throwaway_id);
   this->key_extraction_ctx_.advertised_type = KEY_EXTRACTION_ADVERTISED_TYPE;
   this->key_extraction_ctx_.advertised_subtype = KEY_EXTRACTION_ADVERTISED_SUBTYPE;
@@ -200,6 +205,48 @@ void KeyExtractionResponder::set_armed(bool armed) {
     this->armed_callback_(true);
 }
 
+void KeyExtractionResponder::request_key_pull() {
+  // Arm the responder if it isn't already, so try_handle_frame() will process the sender's reply and
+  // the 10-minute auto-off still bounds the whole cycle. set_armed(true) picks a throwaway ID and
+  // resets pull_requested_; do the pull setup after it so those don't get clobbered.
+  if (this->key_extraction_ctx_.state == pairing_responder::ResponderState::DISARMED)
+    this->set_armed(true);
+
+  crypto::generate_challenge(this->pull_challenge_);
+  this->pull_requested_ = true;
+  ESP_LOGW(detail::TAG,
+           "Key extraction: pull request active, throwaway ID %s. Trigger your hub's send-key / copy-key function "
+           "now (e.g. Somfy Nina io \"Schlüssel senden\").",
+           node_id_to_string(this->key_extraction_ctx_.throwaway_id).c_str());
+  this->send_pull_request_();
+}
+
+void KeyExtractionResponder::send_pull_request_() {
+  if (!this->pull_requested_ || this->key_extraction_ctx_.state == pairing_responder::ResponderState::DISARMED)
+    return;
+
+  IoFrame req;
+  if (create_launch_key_transfer(req, this->key_extraction_ctx_.throwaway_id, BROADCAST_DISCOVER,
+                                 this->pull_challenge_)) {
+    this->broadcast_reply_(req);  // START-flagged -> cold_broadcast_reply_preamble, like our 0x29.
+    this->key_extraction_hold_deadline_ms_ = millis() + KEY_EXTRACTION_MID_ATTEMPT_TIMEOUT_MS;
+    ESP_LOGI(detail::TAG, "Key extraction: sent pull request (0x38) as %s",
+             node_id_to_string(this->key_extraction_ctx_.throwaway_id).c_str());
+  } else {
+    ESP_LOGW(detail::TAG, "Key extraction: failed to build pull request");
+  }
+
+  // Re-send on a timer while the pull is still outstanding: the user arms this, then walks to the
+  // hub and triggers its send-key function, so a single request would almost always race ahead of
+  // the hub being ready. The named timer replaces its own pending callback each cycle, and the
+  // guard inside stops it once a reply clears pull_requested_ or the window disarms. Hard-bounded by
+  // the 10-minute auto-off timer, which this never touches.
+  this->schedule_auto_off_(KEY_EXTRACTION_PULL_RETRY_TIMER_NAME, KEY_EXTRACTION_PULL_RETRY_MS, [this]() {
+    if (this->pull_requested_ && this->key_extraction_ctx_.state != pairing_responder::ResponderState::DISARMED)
+      this->send_pull_request_();
+  });
+}
+
 bool KeyExtractionResponder::try_handle_frame(const IoFrame &frame) {
   if (this->key_extraction_ctx_.state == pairing_responder::ResponderState::DISARMED)
     return false;
@@ -219,7 +266,13 @@ bool KeyExtractionResponder::try_handle_frame(const IoFrame &frame) {
     return true;
   }
   if (frame.cmd == CMD_KEY_TRANSFER) {
-    this->handle_key_transfer_(frame);
+    // A pull-flow reply (sender answering our 0x38) arrives while pull_requested_ is set and the
+    // push state machine never reached SENT_CHALLENGE (no hub discovered us). Decode it with the
+    // pull IV; otherwise fall through to the push handler, which uses the push IV.
+    if (this->pull_requested_ && this->key_extraction_ctx_.state != pairing_responder::ResponderState::SENT_CHALLENGE)
+      this->handle_pull_key_transfer_(frame);
+    else
+      this->handle_key_transfer_(frame);
     return true;
   }
   if (frame.cmd == CMD_ADDRESS_REQ) {
@@ -370,6 +423,31 @@ void KeyExtractionResponder::handle_key_transfer_(const IoFrame &frame) {
   // hub_node_id, so a different hub's traffic still cannot advance the state machine backwards. The
   // grace timer below disarms once no further progress is seen from the real hub, instead of doing
   // it at once.
+  this->arm_post_extraction_grace();
+}
+
+void KeyExtractionResponder::handle_pull_key_transfer_(const IoFrame &frame) {
+  if (frame.data_len < AES_KEY_SIZE) {
+    ESP_LOGW(detail::TAG, "Key extraction: pull key-transfer payload too short (%u bytes)", frame.data_len);
+    return;
+  }
+  uint8_t recovered[AES_KEY_SIZE];
+  if (!recover_system_key_from_pull_transfer(frame.data, this->pull_challenge_, recovered)) {
+    ESP_LOGW(detail::TAG, "Key extraction: pull key-transfer decode failed");
+    return;
+  }
+
+  // Commit into the same context the push flow uses so log_result_() and the grace window behave
+  // identically: the recovered key and the sender's real node ID (from the 0x32's src). Move to
+  // EXTRACTED and clear pull_requested_ so the retry timer stops and a repeat 0x32 is ignored.
+  memcpy(this->key_extraction_ctx_.recovered_key, recovered, AES_KEY_SIZE);
+  memcpy(this->key_extraction_ctx_.hub_node_id, frame.src, NODE_ID_SIZE);
+  this->key_extraction_ctx_.state = pairing_responder::ResponderState::EXTRACTED;
+  this->pull_requested_ = false;
+
+  this->log_result_();
+  ESP_LOGI(detail::TAG, "Key extraction: recovered system key via pull request from hub %s",
+           node_id_to_string(frame.src).c_str());
   this->arm_post_extraction_grace();
 }
 

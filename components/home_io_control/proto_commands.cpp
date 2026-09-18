@@ -792,6 +792,34 @@ bool recover_system_key_from_transfer(const uint8_t transfer_payload[AES_KEY_SIZ
   return crypto::crypt_key(&key_init_cmd, 1, challenge, transfer_payload, out_key);
 }
 
+/// Build a device-initiated ("pull") key-transfer request (CMD_LAUNCH_KEY_TRANSFER, 0x38) — device
+/// side. See proto_commands.h for the full contract and the speculation caveat.
+bool create_launch_key_transfer(IoFrame &f, const uint8_t *own, const uint8_t *dst, const uint8_t challenge[HMAC_SIZE]) {
+  // START set (this opens a new exchange the sender must catch cold, like our 0x29 discovery reply),
+  // END clear, LOW_POWER clear (device-originated). The 6-byte challenge is the payload; the sender
+  // masks its key-transfer reply under an IV built from this whole request ({0x38} + challenge) —
+  // see recover_system_key_from_pull_transfer() for the decode side.
+  init_frame(f, /*is_2w=*/true, /*start=*/true, /*end=*/false, /*low_power=*/false);
+  set_dst(f, dst);
+  set_src(f, own);
+  return set_cmd(f, CMD_LAUNCH_KEY_TRANSFER, challenge, HMAC_SIZE);
+}
+
+/// Recover the system key from a "pull"-flow CMD_KEY_TRANSFER (0x32) reply — the sender's answer to
+/// our CMD_LAUNCH_KEY_TRANSFER (0x38). Unlike the push flow's recover_system_key_from_transfer()
+/// above (IV = {CMD_KEY_INIT}), the pull IV is the full 7-byte request: {CMD_LAUNCH_KEY_TRANSFER}
+/// followed by the 6-byte challenge we sent. This exact convention is a documented
+/// iown-homecontrol known-answer capture, pinned in proto_crypto_test.cpp
+/// (CryptKeyMatchesDocumentedIownHomecontrolPullCapture), so the crypto here does not rest on this
+/// codebase's own conventions.
+bool recover_system_key_from_pull_transfer(const uint8_t transfer_payload[AES_KEY_SIZE],
+                                           const uint8_t challenge[HMAC_SIZE], uint8_t out_key[AES_KEY_SIZE]) {
+  uint8_t iv_data[1 + HMAC_SIZE];
+  iv_data[0] = CMD_LAUNCH_KEY_TRANSFER;
+  memcpy(&iv_data[1], challenge, HMAC_SIZE);
+  return crypto::crypt_key(iv_data, sizeof(iv_data), challenge, transfer_payload, out_key);
+}
+
 /// Build a key-init request (0x31) to start the pairing key exchange with a discovered device.
 bool create_key_init(IoFrame &f, const uint8_t *own, const uint8_t *dst) {
   // low_power=true, no ACK: the pairing key-init keeps the fixed `48 20` shape it was

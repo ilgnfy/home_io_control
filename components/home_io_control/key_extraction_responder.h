@@ -63,6 +63,16 @@ class KeyExtractionResponder {
   /// @param armed Desired state.
   void set_armed(bool armed);
 
+  /// Start (or restart) a device-initiated "pull" key request: arm the responder if it isn't
+  /// already, then actively transmit CMD_LAUNCH_KEY_TRANSFER (0x38) — retried on a timer inside the
+  /// arm window — to ask a sender-mode hub (e.g. Somfy Nina io "Schlüssel senden") to hand over its
+  /// system key, instead of only waiting passively to be discovered. The sender's CMD_KEY_TRANSFER
+  /// (0x32) reply is decoded with the pull IV (recover_system_key_from_pull_transfer()) and logged
+  /// like any other extraction. This is the body behind the "Request System Key" HA button.
+  /// @warning Experimental: the 0x38 request framing is unconfirmed against a real hub (only the
+  /// reply crypto is pinned) — see create_launch_key_transfer() in proto_commands.h.
+  void request_key_pull();
+
   /// Register a callback invoked whenever the key-extraction armed state changes — manual
   /// toggle, successful extraction, or auto-off timeout — so the switch entity can keep its
   /// displayed state in sync when the responder disarms itself rather than the user. Single-slot.
@@ -137,6 +147,16 @@ class KeyExtractionResponder {
   /// this is consumed.
   uint32_t key_extraction_hold_deadline_ms_{0};
 
+  /// Set while a device-initiated "pull" request (0x38) is outstanding for the current arm cycle:
+  /// request_key_pull() sets it, send_pull_request_()'s retry timer keeps re-transmitting while it
+  /// holds, and it clears on disarm or once a pull-flow 0x32 is recovered. Independent of the push
+  /// state machine (key_extraction_ctx_.state), which stays ARMED_IDLE throughout a pull because no
+  /// hub discovered us — the sender answered our request instead.
+  bool pull_requested_{false};
+  /// The 6-byte challenge sent in our 0x38 and reused to decode the sender's 0x32 reply. Valid only
+  /// while pull_requested_ is set.
+  uint8_t pull_challenge_[HMAC_SIZE]{};
+
  private:
   /// Handle an inbound CMD_DISCOVER_REQ (0x28) while the responder is armed.
   void handle_discover_(const IoFrame &frame);
@@ -170,6 +190,15 @@ class KeyExtractionResponder {
   /// implemented" reply a real Somfy device sends for 0x58 (create_error_resp()). Pure read: does
   /// NOT mutate key_extraction_ctx_.state, same as handle_get_info1_().
   void handle_general_info3_(const IoFrame &frame);
+  /// Build and broadcast one CMD_LAUNCH_KEY_TRANSFER (0x38) pull request using pull_challenge_, then
+  /// schedule the next retry within the arm window. Called by request_key_pull() and re-entered from
+  /// its own retry timer while pull_requested_ is set and the responder is still armed.
+  void send_pull_request_();
+  /// Handle a "pull"-flow CMD_KEY_TRANSFER (0x32) — a sender's answer to our 0x38, recognized by
+  /// pull_requested_ being set while the push state machine is not mid-challenge. Recovers the key
+  /// with the pull IV (recover_system_key_from_pull_transfer()) and reports it. Distinct from
+  /// handle_key_transfer_(), which decodes the push flow's 0x32 with a different IV.
+  void handle_pull_key_transfer_(const IoFrame &frame);
   /// Transmit a key-extraction reply frame on all 3 IO-homecontrol channels, using the radio
   /// driver's response_preamble() rather than a fixed SHORT_PREAMBLE/LONG_PREAMBLE constant —
   /// long enough that a channel-hopping receiver reliably lands on it, short enough that 3
