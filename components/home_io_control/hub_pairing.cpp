@@ -23,6 +23,9 @@ bool IOHomeControlComponent::discover_and_pair() {
   this->busy_ = true;
   bool const ok = this->pairing_engine_.discover_and_pair();
   this->busy_ = false;
+  // "Receive key" mode (the Request System Key button) is one-shot: clear it after the attempt so a
+  // subsequent ordinary Discover & Pair pushes our key as usual. Harmless when it was already off.
+  this->pairing_engine_.set_receive_key_mode(false);
   // Only fire once an attempt actually ran (telemetry was populated) — not on the early-return
   // guard above, which would otherwise republish stale telemetry from a previous attempt.
   if (this->pairing_result_callback_)

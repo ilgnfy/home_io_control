@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstdio>
 #include <cstring>
 
 namespace esphome {
@@ -343,6 +344,58 @@ bool PairingEngine::transfer_key_and_wait_confirm_(pairing::PairingContext &cont
   return wait_for_key_confirm_(context);
 }
 
+/// "Receive key" counterpart to transfer_key_and_wait_confirm_(): ask the device for its own key
+/// with a 0x38 pull request instead of pushing ours. See the header for the full contract.
+bool PairingEngine::request_key_and_wait_transfer_(pairing::PairingContext &context) {
+  // The device's 0x3C challenge (context.rx) is both the 0x38 payload and the reply's IV seed.
+  if (context.rx.data_len < HMAC_SIZE) {
+    ESP_LOGW(TAG, "Receive key: challenge too short (%u bytes), cannot build pull request", context.rx.data_len);
+    return false;
+  }
+  uint8_t challenge[HMAC_SIZE];
+  memcpy(challenge, context.rx.data, HMAC_SIZE);
+
+  if (!create_launch_key_transfer(context.req, node_id_, context.device.node_id, challenge)) {
+    ESP_LOGW(TAG, "Receive key: failed to build pull request (0x38)");
+    return false;
+  }
+  if (engine_.send_and_receive(context.req, context.resp, FREQ_CH2) != ExchangeOutcome::SUCCESS_WITH_RESPONSE) {
+    ESP_LOGW(TAG, "Receive key: no reply to pull request (0x38) — the hub may not support a device-initiated key pull");
+    return false;
+  }
+  if (context.resp.cmd != CMD_KEY_TRANSFER || context.resp.data_len < AES_KEY_SIZE) {
+    ESP_LOGW(TAG, "Receive key: unexpected reply cmd=0x%02X data_len=%u (expected KEY_TRANSFER 0x32, >=16 bytes)",
+             context.resp.cmd, context.resp.data_len);
+    return false;
+  }
+
+  uint8_t recovered[AES_KEY_SIZE];
+  if (!recover_system_key_from_pull_transfer(context.resp.data, challenge, recovered)) {
+    ESP_LOGW(TAG, "Receive key: key-transfer decode failed");
+    return false;
+  }
+
+  // Deliberate, explicit exception to redaction masking — the same one the key-extraction responder
+  // makes for its own result block (see hub_internal.h / README's "Reporting Unsupported Devices"):
+  // the recovered system key is printed so the user can put it in their config. The 3-byte node id
+  // plus 32-hex-char key is well under ESPHome's 512-byte log line, so a single line per field is
+  // safe without the multi-line splitter the responder needs.
+  std::string key_hex;
+  key_hex.reserve(AES_KEY_SIZE * 2);
+  for (uint8_t i = 0; i < AES_KEY_SIZE; i++) {
+    char byte_hex[3];
+    std::snprintf(byte_hex, sizeof(byte_hex), "%02X", recovered[i]);
+    key_hex += byte_hex;
+  }
+  ESP_LOGW(TAG, "========================================");
+  ESP_LOGW(TAG, "RECEIVE KEY SUCCESS — recovered system key via 0x38 pull from hub %s",
+           node_id_to_string(context.device.node_id).c_str());
+  ESP_LOGW(TAG, "  node_id:    %s", node_id_to_string(context.device.node_id).c_str());
+  ESP_LOGW(TAG, "  system_key: %s", key_hex.c_str());
+  ESP_LOGW(TAG, "========================================");
+  return true;
+}
+
 // --- Discovery metadata ---
 
 /// Parse a discovery response frame into device metadata and ID.
@@ -584,6 +637,14 @@ bool PairingEngine::run_key_exchange_phase_(pairing::PairingContext &context) {
   // frame-log helpers (log_frame()/log_component_capture()) already mask both commands.
   ESP_LOGI(TAG, "Challenge (0x3C) received: data_len=%u freq=%" PRIu32 " rssi=%d", context.rx.data_len,
            context.packet.freq_hz, radio_()->get_last_capture().rssi_dbm);
+
+  // "Receive key" mode diverts here: instead of pushing our key, ask the device for its own
+  // (0x38 pull, carrying the challenge it just sent) and decode the 0x32 it replies with. This is
+  // the "Request System Key" button's path, for sender-mode hubs that answer the handshake up to
+  // the challenge but reject a foreign key (e.g. Somfy Nina io). Experimental — see
+  // set_receive_key_mode() (pairing_engine.h).
+  if (this->receive_key_mode_)
+    return this->request_key_and_wait_transfer_(context);
 
   bool key_ok = transfer_key_and_wait_confirm_(context);
   // Fast-turnaround radios catch the 0x33 through the standard exchange wait inside the helper

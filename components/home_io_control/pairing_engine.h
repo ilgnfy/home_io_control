@@ -97,6 +97,17 @@ class PairingEngine {
   /// @return true if all three phases completed successfully; false otherwise.
   bool discover_and_pair();
 
+  /// Enable/disable "receive key" mode for the next discover_and_pair() attempt. In this mode the
+  /// key-exchange phase, after the device's 0x3C challenge, sends a CMD_LAUNCH_KEY_TRANSFER (0x38)
+  /// pull request (carrying that challenge) instead of pushing our own key, then decodes the
+  /// device's CMD_KEY_TRANSFER (0x32) reply to recover *its* system key — the "Request System Key"
+  /// button drives this. Experimental: it hijacks the standard pairing handshake (which a
+  /// sender-mode hub like Somfy Nina io answers up to the challenge) to ask for the key at the point
+  /// one would flow. One-shot: the hub clears it after each attempt. See
+  /// create_launch_key_transfer() in proto_commands.h for the framing caveat.
+  /// @param on Desired mode.
+  void set_receive_key_mode(bool on) { this->receive_key_mode_ = on; }
+
   /// Extract node ID, device type, and subtype from a CMD_DISCOVER_RESP frame.
   /// @return The decoded extended discovery fields (manufacturer / Multi Information Byte / length
   ///         flags), so a caller can read the self-reported power class without decoding twice.
@@ -188,6 +199,17 @@ class PairingEngine {
   /// @return true if the device confirmed the key.
   bool transfer_key_and_wait_confirm_(pairing::PairingContext &context);
 
+  /// "Receive key" counterpart to transfer_key_and_wait_confirm_(): instead of pushing our key,
+  /// send a CMD_LAUNCH_KEY_TRANSFER (0x38) pull request carrying the device's own 0x3C challenge
+  /// (in `context.rx.data`), then wait for its CMD_KEY_TRANSFER (0x32) reply and recover the
+  /// device's system key from it (recover_system_key_from_pull_transfer(), pull IV). On success the
+  /// recovered node ID + key are logged like the key-extraction responder's result block. Used only
+  /// when receive_key_mode_ is set. Experimental — see set_receive_key_mode().
+  /// @param context Pairing context; `context.rx.data` supplies the challenge, `context.req`/
+  ///        `context.resp` are reused for the 0x38/0x32 exchange.
+  /// @return true if a key was recovered; false on timeout, wrong reply, or decode failure.
+  bool request_key_and_wait_transfer_(pairing::PairingContext &context);
+
  private:
   /// Preamble for a directed pairing start frame (0x2C, 0x31, 0x6F) to the device discovery just
   /// found: the shorter of ExchangeEngine::request_preamble_for()'s rule and the preamble the
@@ -241,6 +263,10 @@ class PairingEngine {
   DeviceRegistry &registry_;
   PairingTelemetry &telemetry_;
   const RecentOneWayPairingSighting &recent_oneway_sighting_;
+
+  /// When set, the next key-exchange phase asks the device for *its* key (0x38 pull) instead of
+  /// pushing ours — see set_receive_key_mode(). One-shot; the hub clears it after each attempt.
+  bool receive_key_mode_{false};
 };
 
 }  // namespace home_io_control
